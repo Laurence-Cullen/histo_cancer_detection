@@ -15,14 +15,16 @@ from keras.layers import Conv2D, MaxPooling2D
 from keras.layers import BatchNormalization, Dropout
 
 train_directory = pathlib.Path('train')
+test_directory = pathlib.Path('test')
+
 image_extension = 'tif'
 
 
-def get_train_image(name, directory=train_directory):
+def get_image(name, directory=train_directory):
     """
     Args:
         directory (pathlib.Path):
-        name (str): The filename of the image to load, without the file extension or folder location
+        name (str): The filename of the image to load, without the file extension or folder location.
 
     Returns:
         4D numpy array (examples, height, width, channels)
@@ -32,14 +34,15 @@ def get_train_image(name, directory=train_directory):
     return np.asarray(img, dtype="int32")
 
 
-def load_data(file_names, max_files=10000):
+def load_data(file_names, max_files=30000, test=False):
     """
     Load in image files to a list of numpy arrays. Sequentially stack arrays
     into a single array.
 
     Args:
-        file_names (list): A sequence of file names to load data from
-        max_files (int): The maximum number of files to load, added due to performance issues
+        test (bool): True if loading test data, False for train data.
+        file_names (list): A sequence of file names to load data from.
+        max_files (int): The maximum number of files to load, added due to performance issues.
 
     Returns:
 
@@ -51,7 +54,7 @@ def load_data(file_names, max_files=10000):
     print_every = 100
 
     # how often to stack list of arrays into a single array
-    stack_every = 10000
+    stack_every = 1000
 
     arrays = []
     data = None
@@ -64,7 +67,10 @@ def load_data(file_names, max_files=10000):
             print("swap memory usage:", psutil.swap_memory())
 
         # load image array and append to arrays
-        arrays.append(get_train_image(name=file_name))
+        if test:
+            arrays.append(get_image(name=file_name, directory=test_directory))
+        else:
+            arrays.append(get_image(name=file_name))
 
         if counter % stack_every == 0:
             if data is None:
@@ -110,7 +116,7 @@ def unison_shuffled_copies(a, b):
     return a[p], b[p]
 
 
-def main():
+def initialise_data():
     # loading labels in
     labels = pd.read_csv('train_labels.csv')
 
@@ -130,13 +136,10 @@ def main():
     # shuffling before splitting test and train sets
     y, x = unison_shuffled_copies(y, x)
 
-    # set model training hyper parameters
-    test_fraction = 0.1  # what fraction of examples to use in test set
-    batch_size = 128  # mini batch size
-    num_classes = 1
-    epochs = 200
-    dropout = 0.5  # fraction of weights to dropout each epoch
+    return y, x
 
+
+def test_train_split(x, y, test_fraction):
     examples = y.shape[0]
     test_examples = int(examples * test_fraction)
     train_examples = examples - test_examples
@@ -149,12 +152,10 @@ def main():
     y_train = y[0:train_examples:]
     y_test = y[train_examples::]
 
-    print('x_train shape:', x_train.shape)
-    print(x_train.shape[0], 'train samples')
+    return x_train, x_test, y_train, y_test
 
-    print('x_test shape:', x_test.shape)
-    print(x_test.shape[0], 'test samples')
 
+def initialise_custom_model(input_shape, dropout, num_classes):
     # build model topology
     model = Sequential()
     model.add(
@@ -162,16 +163,16 @@ def main():
             64,
             kernel_size=(3, 3),
             activation='relu',
-            input_shape=(96, 96, 3)  # setting image input shape
+            input_shape=input_shape  # setting image input shape
         )
     )
     model.add(BatchNormalization())
     model.add(Conv2D(64, (3, 3), activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2)))
     model.add(BatchNormalization())
-    model.add(Conv2D(64, (3, 3), activation='relu'))
+    model.add(Conv2D(40, (3, 3), activation='relu'))
     model.add(BatchNormalization())
-    model.add(Conv2D(64, (3, 3), activation='relu'))
+    model.add(Conv2D(30, (3, 3), activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2)))
     model.add(Dropout(dropout))
     model.add(Flatten())
@@ -187,21 +188,95 @@ def main():
     model.add(BatchNormalization())
     model.add(Dense(num_classes, activation='sigmoid'))
 
-    model.compile(loss=keras.losses.binary_crossentropy,
-                  optimizer=keras.optimizers.Adam(lr=0.0001),
-                  metrics=['accuracy'])
+    return model
+
+
+def create_submission(model, submission_name='submission.csv'):
+    # loading labels in
+    labels = pd.read_csv('sample_submission.csv')
+
+    # extracting pandas series as numpy arrays
+    y = labels['label'].values
+    file_names = labels['id'].values
+
+    # x = load_data(file_names, max_files=len(y), test=True)
+
+    # x = normalize_image_data(x)
+    #
+    # predictions = model.predict(x)
+
+    predictions = []
+    counter = 0
+
+    for file_name in file_names:
+        if counter % 100 == 0:
+            print(f'processing image {counter}')
+
+        image = get_image(file_name, directory=test_directory)
+
+        normalized_image = normalize_image_data(image)
+
+        reshaped_image = np.reshape(normalized_image, (1, 96, 96, 3))
+
+        predictions.append(model.predict(reshaped_image))
+
+        counter += 1
+
+    predictions_array = np.asarray(predictions).flatten()
+    print(predictions_array)
+
+    frame = pd.DataFrame(data={'id': file_names, 'label': predictions_array})
+
+    frame.to_csv(submission_name, index=False, header=['id', 'label'])
+
+
+def train_model():
+    y, x = initialise_data()
+
+    # set model training hyper parameters
+    test_fraction = 0.1  # what fraction of examples to use in test set
+    batch_size = 128  # mini batch size
+    num_classes = 1
+    epochs = 35
+    dropout = 0.5  # fraction of weights to dropout each epoch
+
+    x_train, x_test, y_train, y_test = test_train_split(x, y, test_fraction)
+
+    print('x_train shape:', x_train.shape)
+    print(x_train.shape[0], 'train samples')
+
+    print('x_test shape:', x_test.shape)
+    print(x_test.shape[0], 'test samples')
+
+    model = initialise_custom_model(input_shape=(96, 96, 3), dropout=dropout, num_classes=num_classes)
+
+    model.compile(
+        loss=keras.losses.binary_crossentropy,
+        optimizer=keras.optimizers.Adam(lr=0.0001),
+        metrics=['accuracy']
+    )
 
     # train model
-    model.fit(x_train, y_train,
-              batch_size=batch_size,
-              epochs=epochs,
-              verbose=1,
-              validation_data=(x_test, y_test))
+    model.fit(
+        x_train,
+        y_train,
+        batch_size=batch_size,
+        epochs=epochs,
+        verbose=1,
+        validation_data=(x_test, y_test)
+    )
 
     # get final model test set performance
     score = model.evaluate(x_test, y_test, verbose=0)
     print('Test loss:', score[0])
     print('Test accuracy:', score[1])
+
+    return model
+
+
+def main():
+    model = train_model()
+    create_submission(model=model, submission_name='test_submission.csv')
 
 
 if __name__ == '__main__':
