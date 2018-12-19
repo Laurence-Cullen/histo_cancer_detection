@@ -1,6 +1,8 @@
 # histo_cancer_detection
 Kaggle competition to tag lymph node biopsies as having tumorous cells or not.
 
+https://www.kaggle.com/c/histopathologic-cancer-detection/
+
 Experimenting with convolutional layers, batch norm with the top layer
 composed of dense layers heavily dropped out.
 
